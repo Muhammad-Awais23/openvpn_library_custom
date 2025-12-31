@@ -585,7 +585,10 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-
+if ("FORCE_DISCONNECT".equals(intent.getAction())) {
+    disconnectDueToTimeLimit();
+    return START_NOT_STICKY;
+}
         // ✅ HANDLE TIMER MONITORING INTENT FIRST
         if (intent != null && "START_TIMER_MONITORING".equals(intent.getAction())) {
             Log.d(TAG, "Received START_TIMER_MONITORING intent");
