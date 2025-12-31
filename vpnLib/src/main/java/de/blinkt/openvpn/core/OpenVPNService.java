@@ -1009,7 +1009,7 @@ if ("FORCE_DISCONNECT".equals(intent.getAction())) {
         try {
             Log.d(TAG, "=== DISCONNECTING VPN DUE TO TIME LIMIT ===");
 
-            // Show final notification BEFORE disconnecting
+            // CRITICAL: Show notification FIRST and give it time to display
             showTimeLimitReachedNotification();
 
             // Stop timer monitoring
@@ -1018,35 +1018,51 @@ if ("FORCE_DISCONNECT".equals(intent.getAction())) {
             // Clear timer preferences
             clearTimerPreferences();
 
-            // CRITICAL: Stop the VPN connection
-            if (mManagement != null) {
-                Log.d(TAG, "Stopping VPN via management interface");
-                mManagement.stopVPN(false);
-            }
-
-            // Force stop OpenVPN process
-            forceStopOpenVpnProcess();
-
-            // Update VPN status
+            // Update VPN status BEFORE stopping
             VpnStatus.updateStateString("NOPROCESS", "VPN disconnected - Time limit reached",
                     R.string.state_noprocess, ConnectionStatus.LEVEL_NOTCONNECTED);
 
-            // Stop the service itself
+            // Use a handler to delay the actual disconnect
+            // This ensures the notification has time to be displayed
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                Log.d(TAG, "Stopping foreground service");
-                stopForeground(true);
-                stopSelf();
-            }, 1000);
+                try {
+                    // Stop the VPN connection
+                    if (mManagement != null) {
+                        Log.d(TAG, "Stopping VPN via management interface");
+                        mManagement.stopVPN(false);
+                    }
+
+                    // Force stop OpenVPN process
+                    forceStopOpenVpnProcess();
+
+                    // Delay stopping the service to ensure notification persists
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        Log.d(TAG, "Stopping foreground service");
+                        try {
+                            // Remove the ongoing notification but keep the warning notification
+                            stopForeground(true);
+                            stopSelf();
+                        } catch (Exception ex) {
+                            Log.e(TAG, "Error stopping service: " + ex.getMessage());
+                        }
+                    }, 2000); // Wait 2 seconds before stopping service
+
+                } catch (Exception e) {
+                    Log.e(TAG, "Error in delayed disconnect: " + e.getMessage(), e);
+                }
+            }, 500); // Wait 500ms for notification to be posted
 
         } catch (Exception e) {
             Log.e(TAG, "Error disconnecting VPN: " + e.getMessage(), e);
-            // Force stop anyway
-            try {
-                stopForeground(true);
-                stopSelf();
-            } catch (Exception ex) {
-                Log.e(TAG, "Error force stopping service: " + ex.getMessage());
-            }
+            // Force stop anyway after a delay
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                try {
+                    stopForeground(true);
+                    stopSelf();
+                } catch (Exception ex) {
+                    Log.e(TAG, "Error force stopping service: " + ex.getMessage());
+                }
+            }, 2000);
         }
     }
 
@@ -1057,39 +1073,77 @@ if ("FORCE_DISCONNECT".equals(intent.getAction())) {
 
             String channel = NOTIFICATION_CHANNEL_NEWSTATUS_ID;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                channel = createNotificationChannel(channel, getAppName(this) + " VPN Alert");
+                // Create a high-priority channel for this critical notification
+                NotificationChannel chan = new NotificationChannel(
+                        "vpn_time_limit_alert",
+                        getAppName(this) + " VPN Time Alert",
+                        NotificationManager.IMPORTANCE_HIGH  // High importance for visibility
+                );
+                chan.setLightColor(Color.RED);
+                chan.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+                chan.enableVibration(true);
+                chan.setVibrationPattern(new long[]{0, 500, 250, 500});
+
+                NotificationManager service = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                service.createNotificationChannel(chan);
+                channel = "vpn_time_limit_alert";
             }
 
             NotificationManager mNotificationManager =
                     (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 
+            // Create intent to open the app
+            Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getApplicationContext().getPackageName());
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            }
+            PendingIntent pendingIntent = PendingIntent.getActivity(
+                    this,
+                    0,
+                    launchIntent != null ? launchIntent : new Intent(),
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+            );
+
             Notification.Builder nbuilder = new Notification.Builder(this);
 
-            nbuilder.setContentTitle("VPN Disconnected - Time Limit Reached");
-            nbuilder.setContentText("Your VPN session has ended. Purchase more time to reconnect.");
+            nbuilder.setContentTitle("⏱️ VPN Time Limit Reached");
+            nbuilder.setContentText("Your VPN session has ended. Purchase more time to continue.");
+            nbuilder.setStyle(new Notification.BigTextStyle()
+                    .bigText("Your VPN session has ended. Purchase more time to continue using the VPN service."));
             nbuilder.setSmallIcon(R.drawable.ic_notification);
+            nbuilder.setContentIntent(pendingIntent);
             nbuilder.setAutoCancel(true);
-            nbuilder.setOngoing(false); // NOT ongoing - can be dismissed
+            nbuilder.setOngoing(false);  // Can be dismissed
+            nbuilder.setOnlyAlertOnce(false);  // Always alert
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
                 nbuilder.setPriority(Notification.PRIORITY_MAX);
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                nbuilder.setCategory(Notification.CATEGORY_STATUS);
+                nbuilder.setCategory(Notification.CATEGORY_ALARM);  // ALARM category for high priority
+                nbuilder.setVisibility(Notification.VISIBILITY_PUBLIC);
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 nbuilder.setChannelId(channel);
+                nbuilder.setTimeoutAfter(30000);  // Keep for 30 seconds
             }
 
+            // Add sound, vibration, and LED
             nbuilder.setDefaults(Notification.DEFAULT_ALL);
             nbuilder.setVibrate(new long[]{0, 500, 250, 500});
 
-            Notification notification = nbuilder.build();
-            mNotificationManager.notify(10000, notification);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                nbuilder.setColor(Color.RED);  // Red color for urgency
+            }
 
-            Log.d(TAG, "Time limit notification shown");
+            Notification notification = nbuilder.build();
+
+            // Use a unique high ID that won't conflict with other notifications
+            mNotificationManager.notify(99999, notification);
+
+            Log.d(TAG, "Time limit notification posted successfully");
 
         } catch (Exception e) {
             Log.e(TAG, "Error showing time limit notification: " + e.getMessage(), e);
