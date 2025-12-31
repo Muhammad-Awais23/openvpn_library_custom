@@ -13,6 +13,7 @@ import android.Manifest.permission;
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.app.Activity;
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -38,8 +39,10 @@ import android.os.Handler;
 import android.os.Handler.Callback;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
+import android.os.PowerManager;
 import android.os.Process;
 import android.os.RemoteException;
 import android.system.OsConstants;
@@ -170,6 +173,10 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     private Handler guiHandler;
     private Toast mlastToast;
     private Runnable mOpenVPNThread;
+    private static final String KEY_TIMER_ALARM_SET = "timer_alarm_set";
+    private PowerManager.WakeLock wakeLock;
+    private AlarmManager alarmManager;
+    private PendingIntent timerAlarmIntent;
 
     // From: http://stackoverflow.com/questions/3758606/how-to-convert-byte-size-into-human-readable-format-in-java
     public static String humanReadableByteCount(long bytes, boolean speed, Resources res) {
@@ -260,7 +267,6 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         try {
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 
-            // Check if we have timer settings saved
             int allowedDuration = prefs.getInt(KEY_ALLOWED_DURATION, -1);
             boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
             long startTime = prefs.getLong(KEY_CONNECTION_START_TIME, 0);
@@ -268,13 +274,21 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             Log.d(TAG, "checkAndResumeTimerMonitoring - Duration: " + allowedDuration +
                     ", Pro: " + isProUser + ", StartTime: " + startTime);
 
-            // If we have valid timer settings and VPN is connected, resume monitoring
             if (!isProUser && allowedDuration > 0 && startTime > 0) {
-                // Check if VPN is currently connected
                 String currentStatus = OpenVPNService.getStatus();
                 if (currentStatus != null && currentStatus.equals("connected")) {
                     Log.d(TAG, "Resuming timer monitoring after service restart");
-                    startTimerMonitoring();
+
+                    // Check if time has already expired
+                    long currentTime = System.currentTimeMillis();
+                    long elapsedSeconds = (currentTime - startTime) / 1000;
+
+                    if (elapsedSeconds >= allowedDuration) {
+                        Log.d(TAG, "Time already expired, disconnecting immediately");
+                        disconnectDueToTimeLimit();
+                    } else {
+                        startTimerMonitoring();
+                    }
                 } else {
                     Log.d(TAG, "Timer settings exist but VPN not connected");
                 }
@@ -861,13 +875,19 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     public void onCreate() {
         super.onCreate();
 
+        // Initialize wake lock to keep CPU awake for timer checks
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OpenVPN::TimerWakeLock");
+
         timerThread = new HandlerThread("OpenVPNTimerThread", Process.THREAD_PRIORITY_BACKGROUND);
         timerThread.start();
 
         timerHandler = new Handler(timerThread.getLooper());
         setupTimerCheck();
 
-        // ✅ ADD THIS ONE LINE:
+        alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+
+        // Check and resume timer monitoring
         checkAndResumeTimerMonitoring();
     }
 
@@ -876,9 +896,24 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             @Override
             public void run() {
                 if (isTimerMonitoringActive) {
-                    checkVpnTimeLimit();
+                    // Acquire wake lock before check
+                    if (wakeLock != null && !wakeLock.isHeld()) {
+                        wakeLock.acquire(30000); // 30 second timeout
+                    }
+
+                    try {
+                        checkVpnTimeLimit();
+                    } finally {
+                        // Release wake lock after check
+                        if (wakeLock != null && wakeLock.isHeld()) {
+                            wakeLock.release();
+                        }
+                    }
+
                     // Schedule next check
-                    timerHandler.postDelayed(this, TIMER_CHECK_INTERVAL);
+                    if (isTimerMonitoringActive) {
+                        timerHandler.postDelayed(this, TIMER_CHECK_INTERVAL);
+                    }
                 }
             }
         };
@@ -888,28 +923,24 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         try {
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 
-            // Check if user is pro
             boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
             if (isProUser) {
                 Log.d(TAG, "Pro user - no time limit");
                 return;
             }
 
-            // Get allowed duration
             int allowedDuration = prefs.getInt(KEY_ALLOWED_DURATION, -1);
             if (allowedDuration <= 0) {
                 Log.d(TAG, "No time limit set or invalid duration");
                 return;
             }
 
-            // Get connection start time
             long startTime = prefs.getLong(KEY_CONNECTION_START_TIME, 0);
             if (startTime == 0) {
                 Log.d(TAG, "No start time recorded");
                 return;
             }
 
-            // Calculate elapsed time
             long currentTime = System.currentTimeMillis();
             long elapsedSeconds = (currentTime - startTime) / 1000;
             long remainingSeconds = allowedDuration - elapsedSeconds;
@@ -917,14 +948,14 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             Log.d(TAG, String.format("VPN Timer Check - Elapsed: %ds, Allowed: %ds, Remaining: %ds",
                     elapsedSeconds, allowedDuration, remainingSeconds));
 
-            // Show warning notification at 1 minute remaining
+            // Show warning at 1 minute
             if (remainingSeconds <= 60 && remainingSeconds > 50) {
                 showTimeWarningNotification(remainingSeconds);
             }
 
             // Time's up - disconnect
             if (remainingSeconds <= 0) {
-                Log.d(TAG, "VPN time limit reached - disconnecting");
+                Log.d(TAG, "VPN time limit reached - disconnecting NOW");
                 disconnectDueToTimeLimit();
             }
 
@@ -973,9 +1004,9 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
     private void disconnectDueToTimeLimit() {
         try {
-            Log.d(TAG, "Disconnecting VPN due to time limit");
+            Log.d(TAG, "=== DISCONNECTING VPN DUE TO TIME LIMIT ===");
 
-            // Show final notification
+            // Show final notification BEFORE disconnecting
             showTimeLimitReachedNotification();
 
             // Stop timer monitoring
@@ -984,22 +1015,43 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             // Clear timer preferences
             clearTimerPreferences();
 
-            // Disconnect VPN
+            // CRITICAL: Stop the VPN connection
             if (mManagement != null) {
+                Log.d(TAG, "Stopping VPN via management interface");
                 mManagement.stopVPN(false);
             }
 
-            // Update status
-            VpnStatus.updateStateString("NOPROCESS", "VPN disconnected due to time limit",
+            // Force stop OpenVPN process
+            forceStopOpenVpnProcess();
+
+            // Update VPN status
+            VpnStatus.updateStateString("NOPROCESS", "VPN disconnected - Time limit reached",
                     R.string.state_noprocess, ConnectionStatus.LEVEL_NOTCONNECTED);
+
+            // Stop the service itself
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                Log.d(TAG, "Stopping foreground service");
+                stopForeground(true);
+                stopSelf();
+            }, 1000);
 
         } catch (Exception e) {
             Log.e(TAG, "Error disconnecting VPN: " + e.getMessage(), e);
+            // Force stop anyway
+            try {
+                stopForeground(true);
+                stopSelf();
+            } catch (Exception ex) {
+                Log.e(TAG, "Error force stopping service: " + ex.getMessage());
+            }
         }
     }
 
+
     private void showTimeLimitReachedNotification() {
         try {
+            Log.d(TAG, "Showing time limit reached notification");
+
             String channel = NOTIFICATION_CHANNEL_NEWSTATUS_ID;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 channel = createNotificationChannel(channel, getAppName(this) + " VPN Alert");
@@ -1010,11 +1062,11 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
             Notification.Builder nbuilder = new Notification.Builder(this);
 
-            nbuilder.setContentTitle("VPN Time Limit Reached");
+            nbuilder.setContentTitle("VPN Disconnected - Time Limit Reached");
             nbuilder.setContentText("Your VPN session has ended. Purchase more time to reconnect.");
             nbuilder.setSmallIcon(R.drawable.ic_notification);
             nbuilder.setAutoCancel(true);
-            nbuilder.setOngoing(false);
+            nbuilder.setOngoing(false); // NOT ongoing - can be dismissed
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
                 nbuilder.setPriority(Notification.PRIORITY_MAX);
@@ -1029,9 +1081,12 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             }
 
             nbuilder.setDefaults(Notification.DEFAULT_ALL);
+            nbuilder.setVibrate(new long[]{0, 500, 250, 500});
 
             Notification notification = nbuilder.build();
             mNotificationManager.notify(10000, notification);
+
+            Log.d(TAG, "Time limit notification shown");
 
         } catch (Exception e) {
             Log.e(TAG, "Error showing time limit notification: " + e.getMessage(), e);
@@ -1047,6 +1102,64 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             Log.e(TAG, "Error clearing timer preferences: " + e.getMessage(), e);
         }
     }
+    private void scheduleTimerAlarm(int durationSeconds) {
+        try {
+            if (alarmManager == null) {
+                Log.e(TAG, "AlarmManager is null");
+                return;
+            }
+
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            long startTime = prefs.getLong(KEY_CONNECTION_START_TIME, System.currentTimeMillis());
+            long disconnectTime = startTime + (durationSeconds * 1000L);
+
+            Intent intent = new Intent(this, TimerAlarmReceiver.class);
+            intent.setAction("DISCONNECT_VPN_TIMER");
+
+            timerAlarmIntent = PendingIntent.getBroadcast(
+                    this,
+                    0,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+            );
+
+            // Use exact alarm for critical disconnect
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        disconnectTime,
+                        timerAlarmIntent
+                );
+            } else {
+                alarmManager.setExact(
+                        AlarmManager.RTC_WAKEUP,
+                        disconnectTime,
+                        timerAlarmIntent
+                );
+            }
+
+            prefs.edit().putBoolean(KEY_TIMER_ALARM_SET, true).apply();
+            Log.d(TAG, "Timer alarm scheduled for: " + new java.util.Date(disconnectTime));
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error scheduling timer alarm: " + e.getMessage(), e);
+        }
+    }
+    private void cancelTimerAlarm() {
+        try {
+            if (alarmManager != null && timerAlarmIntent != null) {
+                alarmManager.cancel(timerAlarmIntent);
+                Log.d(TAG, "Timer alarm cancelled");
+            }
+
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            prefs.edit().putBoolean(KEY_TIMER_ALARM_SET, false).apply();
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error cancelling timer alarm: " + e.getMessage(), e);
+        }
+    }
+
 
     private void startTimerMonitoring() {
         try {
@@ -1062,14 +1175,24 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
             long startTime = prefs.getLong(KEY_CONNECTION_START_TIME, 0);
             if (startTime == 0) {
-                prefs.edit().putLong(KEY_CONNECTION_START_TIME, System.currentTimeMillis()).apply();
-                Log.d(TAG, "Set connection start time: " + System.currentTimeMillis());
+                long now = System.currentTimeMillis();
+                prefs.edit().putLong(KEY_CONNECTION_START_TIME, now).apply();
+                Log.d(TAG, "Set connection start time: " + now);
             }
 
             if (!isTimerMonitoringActive) {
                 isTimerMonitoringActive = true;
+
+                // Acquire wake lock
+                if (wakeLock != null && !wakeLock.isHeld()) {
+                    wakeLock.acquire();
+                }
+
                 timerHandler.post(timerCheckRunnable);
-                Log.d(TAG, "Started timer monitoring");
+                Log.d(TAG, "Started timer monitoring with wake lock");
+
+                // Set alarm as backup (in case handler fails)
+                scheduleTimerAlarm(allowedDuration);
             }
 
         } catch (Exception e) {
@@ -1079,10 +1202,26 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
     private void stopTimerMonitoring() {
         try {
+            Log.d(TAG, "Stopping timer monitoring");
+
             if (isTimerMonitoringActive) {
                 isTimerMonitoringActive = false;
                 timerHandler.removeCallbacks(timerCheckRunnable);
-                Log.d(TAG, "Stopped timer monitoring");
+
+                // Release wake lock
+                if (wakeLock != null && wakeLock.isHeld()) {
+                    try {
+                        wakeLock.release();
+                        Log.d(TAG, "Wake lock released");
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error releasing wake lock: " + e.getMessage());
+                    }
+                }
+
+                // Cancel alarm
+                cancelTimerAlarm();
+
+                Log.d(TAG, "Timer monitoring stopped");
             }
         } catch (Exception e) {
             Log.e(TAG, "Error stopping timer monitoring: " + e.getMessage(), e);
@@ -1093,10 +1232,8 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     public void onDestroy() {
         Log.d(TAG, "onDestroy called");
 
-        // Stop timer monitoring first
         stopTimerMonitoring();
 
-        // Quit timer thread
         if (timerThread != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
                 timerThread.quitSafely();
@@ -1104,7 +1241,6 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             timerThread = null;
         }
 
-        // Rest of your existing onDestroy code...
         synchronized (mProcessLock) {
             if (mProcessThread != null) {
                 mManagement.stopVPN(true);
@@ -1116,15 +1252,11 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
                 this.unregisterReceiver(mDeviceStateReceiver);
             }
         } catch (IllegalArgumentException ignored) {
-            // I don't know why this happens:
-            // java.lang.IllegalArgumentException: Receiver not registered
-            // Ignore for now...
         }
 
-        // Just in case unregister for state
         VpnStatus.removeStateListener(this);
         VpnStatus.flushLog();
-    } // ✅ ADD THIS CLOSING BRACE
+    }
 
     private String getTunConfigString() {
         // The format of the string is not important, only that
@@ -1586,14 +1718,12 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             if (!runningOnAndroidTV())
                 channel = NOTIFICATION_CHANNEL_BG_ID;
 
-            // ✅ START TIMER MONITORING WHEN CONNECTED
             Log.d(TAG, "VPN Connected - Starting timer monitoring");
             startTimerMonitoring();
 
         } else {
             mDisplayBytecount = false;
 
-            // ✅ STOP TIMER MONITORING WHEN DISCONNECTED
             if (level == ConnectionStatus.LEVEL_NOTCONNECTED) {
                 Log.d(TAG, "VPN Disconnected - Stopping timer monitoring");
                 stopTimerMonitoring();
@@ -1603,6 +1733,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         showNotification(VpnStatus.getLastCleanLogMessage(this),
                 VpnStatus.getLastCleanLogMessage(this), channel, 0, level, intent);
     }
+
 
     @Override
     public void setConnectedVPN(String uuid) {
