@@ -1163,7 +1163,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             forceStopOpenVpnProcess();
 
             // Update VPN status
-            VpnStatus.updateStateString("NOPROCESS", "VPN disconnected - Time limit reached",
+            VpnStatus.updateStateString("DISCONNECTED", "VPN disconnected - Time limit reached",
                     R.string.state_noprocess, ConnectionStatus.LEVEL_NOTCONNECTED);
 
             // ✅ CRITICAL: Call the proper cleanup method
