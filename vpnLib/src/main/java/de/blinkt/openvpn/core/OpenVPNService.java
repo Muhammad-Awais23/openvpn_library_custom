@@ -127,6 +127,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     private DeviceStateReceiver mDeviceStateReceiver;
     private boolean mDisplayBytecount = false;
     private boolean mStarting = false;
+    private boolean isVpnConnected = false; // ✅ NEW: Track VPN connection state
     private long mConnecttime;
     private OpenVPNManagement mManagement;
     /*private final IBinder mBinder = new IOpenVPNServiceInternal.Stub() {
@@ -583,63 +584,63 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             return false;
     }
 
-@Override
-public int onStartCommand(Intent intent, int flags, int startId) {
-    // Handle force disconnect
-    if ("FORCE_DISCONNECT".equals(intent.getAction())) {
-        disconnectDueToTimeLimit();
-        return START_NOT_STICKY;
-    }
-    
-    // ✅ HANDLE TIMER UPDATE (when user purchases more time)
-    if (intent != null && "UPDATE_TIMER".equals(intent.getAction())) {
-        Log.d(TAG, "🔄 Received UPDATE_TIMER intent");
-        
-        int newDurationSeconds = intent.getIntExtra("duration_seconds", -1);
-        boolean isProUser = intent.getBooleanExtra("is_pro_user", false);
-        
-        Log.d(TAG, "🔄 Updating timer: newDuration=" + newDurationSeconds + 
-              " seconds, isProUser=" + isProUser);
-        
-        // Update shared preferences
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        SharedPreferences.Editor editor = prefs.edit();
-        
-        if (isProUser) {
-            editor.putInt(KEY_ALLOWED_DURATION, -1);
-            editor.putBoolean(KEY_IS_PRO_USER, true);
-            Log.d(TAG, "✅ Updated to Pro user - stopping timer monitoring");
-            
-            // Stop timer monitoring for pro users
-            stopTimerMonitoring();
-            cancelTimerAlarm();
-        } else {
-            // CRITICAL: Reset start time to NOW when adding time
-            long currentTime = System.currentTimeMillis();
-            editor.putInt(KEY_ALLOWED_DURATION, newDurationSeconds);
-            editor.putLong(KEY_CONNECTION_START_TIME, currentTime);
-            editor.putBoolean(KEY_IS_PRO_USER, false);
-            
-            Log.d(TAG, "✅ Updated timer: " + newDurationSeconds + 
-                  " seconds starting from " + currentTime);
-            
-            // Restart timer monitoring with new duration
-            String currentStatus = OpenVPNService.getStatus();
-            if (currentStatus != null && currentStatus.equals("connected")) {
-                // Stop existing timer
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        // Handle force disconnect
+        if ("FORCE_DISCONNECT".equals(intent.getAction())) {
+            disconnectDueToTimeLimit();
+            return START_NOT_STICKY;
+        }
+
+        // ✅ HANDLE TIMER UPDATE (when user purchases more time)
+        if (intent != null && "UPDATE_TIMER".equals(intent.getAction())) {
+            Log.d(TAG, "🔄 Received UPDATE_TIMER intent");
+
+            int newDurationSeconds = intent.getIntExtra("duration_seconds", -1);
+            boolean isProUser = intent.getBooleanExtra("is_pro_user", false);
+
+            Log.d(TAG, "🔄 Updating timer: newDuration=" + newDurationSeconds +
+                    " seconds, isProUser=" + isProUser);
+
+            // ✅ Check if VPN is actually connected before updating timer
+            if (!isVpnConnected) {
+                Log.d(TAG, "⚠️ VPN not connected, skipping timer update");
+                return START_STICKY;
+            }
+
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            SharedPreferences.Editor editor = prefs.edit();
+
+            if (isProUser) {
+                editor.putInt(KEY_ALLOWED_DURATION, -1);
+                editor.putBoolean(KEY_IS_PRO_USER, true);
+                Log.d(TAG, "✅ Updated to Pro user - stopping timer monitoring");
+
                 stopTimerMonitoring();
                 cancelTimerAlarm();
-                
-                // Start new timer with updated duration
-                startTimerMonitoring();
-                
-                Log.d(TAG, "✅ Timer monitoring restarted with new duration");
+            } else {
+                // CRITICAL: Reset start time to NOW when adding time
+                long currentTime = System.currentTimeMillis();
+                editor.putInt(KEY_ALLOWED_DURATION, newDurationSeconds);
+                editor.putLong(KEY_CONNECTION_START_TIME, currentTime);
+                editor.putBoolean(KEY_IS_PRO_USER, false);
+
+                Log.d(TAG, "✅ Updated timer: " + newDurationSeconds +
+                        " seconds starting from " + currentTime);
+
+                // Restart timer monitoring with new duration
+                if (isVpnConnected) {
+                    stopTimerMonitoring();
+                    cancelTimerAlarm();
+                    startTimerMonitoring();
+
+                    Log.d(TAG, "✅ Timer monitoring restarted with new duration");
+                }
             }
+
+            editor.apply();
+            return START_STICKY;
         }
-        
-        editor.apply();
-        return START_STICKY;
-    }
     
     // ✅ HANDLE TIMER MONITORING INTENT
     if (intent != null && "START_TIMER_MONITORING".equals(intent.getAction())) {
@@ -977,6 +978,13 @@ public int onStartCommand(Intent intent, int flags, int startId) {
 
     private void checkVpnTimeLimit() {
         try {
+            // ✅ First check if VPN is still connected
+            if (!isVpnConnected) {
+                Log.d(TAG, "VPN not connected, stopping timer monitoring");
+                stopTimerMonitoring();
+                return;
+            }
+
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 
             boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
@@ -1060,9 +1068,17 @@ public int onStartCommand(Intent intent, int flags, int startId) {
 
     private void disconnectDueToTimeLimit() {
         try {
+            // ✅ Check if VPN is actually connected before trying to disconnect
+            if (!isVpnConnected) {
+                Log.d(TAG, "VPN already disconnected, skipping time limit disconnect");
+                stopTimerMonitoring();
+                clearTimerPreferences();
+                return;
+            }
+
             Log.d(TAG, "=== DISCONNECTING VPN DUE TO TIME LIMIT ===");
 
-            // CRITICAL: Show notification FIRST and give it time to display
+            // Show notification FIRST
             showTimeLimitReachedNotification();
 
             // Stop timer monitoring
@@ -1075,12 +1091,11 @@ public int onStartCommand(Intent intent, int flags, int startId) {
             VpnStatus.updateStateString("NOPROCESS", "VPN disconnected - Time limit reached",
                     R.string.state_noprocess, ConnectionStatus.LEVEL_NOTCONNECTED);
 
-            // Use a handler to delay the actual disconnect
-            // This ensures the notification has time to be displayed
+            // Delay the actual disconnect
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 try {
-                    // Stop the VPN connection
-                    if (mManagement != null) {
+                    // Only disconnect if still connected
+                    if (isVpnConnected && mManagement != null) {
                         Log.d(TAG, "Stopping VPN via management interface");
                         mManagement.stopVPN(false);
                     }
@@ -1088,34 +1103,24 @@ public int onStartCommand(Intent intent, int flags, int startId) {
                     // Force stop OpenVPN process
                     forceStopOpenVpnProcess();
 
-                    // Delay stopping the service to ensure notification persists
+                    // Delay stopping the service
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         Log.d(TAG, "Stopping foreground service");
                         try {
-                            // Remove the ongoing notification but keep the warning notification
                             stopForeground(true);
                             stopSelf();
                         } catch (Exception ex) {
                             Log.e(TAG, "Error stopping service: " + ex.getMessage());
                         }
-                    }, 2000); // Wait 2 seconds before stopping service
+                    }, 2000);
 
                 } catch (Exception e) {
                     Log.e(TAG, "Error in delayed disconnect: " + e.getMessage(), e);
                 }
-            }, 500); // Wait 500ms for notification to be posted
+            }, 500);
 
         } catch (Exception e) {
             Log.e(TAG, "Error disconnecting VPN: " + e.getMessage(), e);
-            // Force stop anyway after a delay
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                try {
-                    stopForeground(true);
-                    stopSelf();
-                } catch (Exception ex) {
-                    Log.e(TAG, "Error force stopping service: " + ex.getMessage());
-                }
-            }, 2000);
         }
     }
 
@@ -1206,8 +1211,13 @@ public int onStartCommand(Intent intent, int flags, int startId) {
     private void clearTimerPreferences() {
         try {
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            prefs.edit().clear().apply();
-            Log.d(TAG, "Cleared timer preferences");
+            SharedPreferences.Editor editor = prefs.edit();
+
+            // Only clear if VPN was disconnected normally (not by timer)
+            if (!isTimerMonitoringActive) {
+                editor.clear().apply();
+                Log.d(TAG, "✅ Cleared timer preferences on normal disconnect");
+            }
         } catch (Exception e) {
             Log.e(TAG, "Error clearing timer preferences: " + e.getMessage(), e);
         }
@@ -1273,6 +1283,12 @@ public int onStartCommand(Intent intent, int flags, int startId) {
 
     private void startTimerMonitoring() {
         try {
+            // ✅ Don't start if not connected
+            if (!isVpnConnected) {
+                Log.d(TAG, "VPN not connected, skipping timer start");
+                return;
+            }
+
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 
             boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
@@ -1845,14 +1861,17 @@ public int onStartCommand(Intent intent, int flags, int startId) {
     @Override
     public void updateState(String state, String logmessage, int resid, ConnectionStatus level, Intent intent) {
         doSendBroadcast(state, level);
+
         if (mProcessThread == null && !mNotificationAlwaysVisible)
             return;
 
         String channel = NOTIFICATION_CHANNEL_NEWSTATUS_ID;
 
         if (level == LEVEL_CONNECTED) {
+            isVpnConnected = true; // ✅ Track connection state
             mDisplayBytecount = true;
             mConnecttime = System.currentTimeMillis();
+
             if (!runningOnAndroidTV())
                 channel = NOTIFICATION_CHANNEL_BG_ID;
 
@@ -1863,14 +1882,17 @@ public int onStartCommand(Intent intent, int flags, int startId) {
             mDisplayBytecount = false;
 
             if (level == ConnectionStatus.LEVEL_NOTCONNECTED) {
+                isVpnConnected = false; // ✅ Track disconnection
                 Log.d(TAG, "VPN Disconnected - Stopping timer monitoring");
                 stopTimerMonitoring();
+                clearTimerPreferences(); // ✅ Clear timer data on disconnect
             }
         }
 
         showNotification(VpnStatus.getLastCleanLogMessage(this),
                 VpnStatus.getLastCleanLogMessage(this), channel, 0, level, intent);
     }
+
 
 
     @Override
