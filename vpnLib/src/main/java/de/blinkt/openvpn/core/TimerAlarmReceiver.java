@@ -18,28 +18,30 @@ public class TimerAlarmReceiver extends BroadcastReceiver {
         if (intent != null && "DISCONNECT_VPN_TIMER".equals(intent.getAction())) {
             Log.d(TAG, "⏰ ========== TIMER ALARM RECEIVED ==========");
             Log.d(TAG, "Time limit reached - Disconnecting VPN");
-            
+
             try {
-                // Send FORCE_DISCONNECT action to OpenVPNService
-                Intent serviceIntent = new Intent(context, OpenVPNService.class);
-                serviceIntent.setAction("FORCE_DISCONNECT"); // ✅ Use FORCE_DISCONNECT, not DISCONNECT_VPN
-                
-                // Use startForegroundService for Android O+
+                // ✅ CRITICAL: Use the proper VPN disconnect mechanism
+                // Create intent that will be handled by OpenVPNService
+                Intent disconnectIntent = new Intent(context, OpenVPNService.class);
+                disconnectIntent.setAction(OpenVPNService.DISCONNECT_VPN); // Use the existing DISCONNECT_VPN action
+
+                // Start the service to handle disconnection
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent);
-                    Log.d(TAG, "✅ Started foreground service with FORCE_DISCONNECT");
+                    context.startForegroundService(disconnectIntent);
+                    Log.d(TAG, "✅ Started foreground service with DISCONNECT_VPN");
                 } else {
-                    context.startService(serviceIntent);
-                    Log.d(TAG, "✅ Started service with FORCE_DISCONNECT");
+                    context.startService(disconnectIntent);
+                    Log.d(TAG, "✅ Started service with DISCONNECT_VPN");
                 }
-                
+
                 Log.d(TAG, "========== TIMER ALARM HANDLED ==========");
+
             } catch (Exception e) {
                 Log.e(TAG, "❌ Error handling timer alarm: " + e.getMessage(), e);
             }
         } else {
-            Log.d(TAG, "⚠️ Received intent with unexpected action: " + 
-                  (intent != null ? intent.getAction() : "null"));
+            Log.d(TAG, "⚠️ Received intent with unexpected action: " +
+                    (intent != null ? intent.getAction() : "null"));
         }
     }
 }

@@ -1136,14 +1136,6 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
     private void disconnectDueToTimeLimit() {
         try {
-            // ✅ Check if VPN is actually connected before trying to disconnect
-            if (!isVpnConnected) {
-                Log.d(TAG, "VPN already disconnected, skipping time limit disconnect");
-                stopTimerMonitoring();
-                clearTimerPreferences();
-                return;
-            }
-
             Log.d(TAG, "=== DISCONNECTING VPN DUE TO TIME LIMIT ===");
 
             // Show notification FIRST
@@ -1155,32 +1147,42 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             // Clear timer preferences
             clearTimerPreferences();
 
-            // Update VPN status BEFORE stopping
+            // ✅ CRITICAL FIX: Use the proper VPN stop mechanism
+            // This is the same flow that happens when user manually disconnects
+
+            if (mManagement != null) {
+                Log.d(TAG, "Stopping VPN via management interface");
+                try {
+                    mManagement.stopVPN(false);
+                } catch (Exception e) {
+                    Log.e(TAG, "Error stopping via management: " + e.getMessage());
+                }
+            }
+
+            // Force stop the OpenVPN process
+            forceStopOpenVpnProcess();
+
+            // Update VPN status
             VpnStatus.updateStateString("NOPROCESS", "VPN disconnected - Time limit reached",
                     R.string.state_noprocess, ConnectionStatus.LEVEL_NOTCONNECTED);
 
-            // Delay the actual disconnect
+            // ✅ CRITICAL: Call the proper cleanup method
+            // This will handle all the necessary cleanup including stopping the VPN tunnel
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 try {
-                    // Only disconnect if still connected
-                    if (isVpnConnected && mManagement != null) {
-                        Log.d(TAG, "Stopping VPN via management interface");
-                        mManagement.stopVPN(false);
-                    }
+                    // This is the proper way to end the VPN service
+                    endVpnService();
 
-                    // Force stop OpenVPN process
-                    forceStopOpenVpnProcess();
-
-                    // Delay stopping the service
+                    // Give it a moment to cleanup
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                        Log.d(TAG, "Stopping foreground service");
                         try {
                             stopForeground(true);
                             stopSelf();
+                            Log.d(TAG, "✅ VPN service stopped completely");
                         } catch (Exception ex) {
-                            Log.e(TAG, "Error stopping service: " + ex.getMessage());
+                            Log.e(TAG, "Error in final cleanup: " + ex.getMessage());
                         }
-                    }, 2000);
+                    }, 1000);
 
                 } catch (Exception e) {
                     Log.e(TAG, "Error in delayed disconnect: " + e.getMessage(), e);
@@ -1191,7 +1193,6 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             Log.e(TAG, "Error disconnecting VPN: " + e.getMessage(), e);
         }
     }
-
 
     private void showTimeLimitReachedNotification() {
         try {
