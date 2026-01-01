@@ -583,55 +583,108 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             return false;
     }
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-if ("FORCE_DISCONNECT".equals(intent.getAction())) {
-    disconnectDueToTimeLimit();
-    return START_NOT_STICKY;
-}
-        // ✅ HANDLE TIMER MONITORING INTENT FIRST
-        if (intent != null && "START_TIMER_MONITORING".equals(intent.getAction())) {
-            Log.d(TAG, "Received START_TIMER_MONITORING intent");
-
-            // Get duration and pro status from intent
-            int durationSeconds = intent.getIntExtra("duration_seconds", -1);
-            boolean isProUser = intent.getBooleanExtra("is_pro_user", false);
-
-            Log.d(TAG, "Timer params - Duration: " + durationSeconds + ", Pro: " + isProUser);
-
-            if (durationSeconds > 0 || isProUser) {
-                // Save to preferences
-                SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                if (prefs.getInt(KEY_ALLOWED_DURATION, -1) > 0) {
-                    startTimerMonitoring();
-                }
-                SharedPreferences.Editor editor = prefs.edit();
-
-                if (isProUser) {
-                    editor.putInt(KEY_ALLOWED_DURATION, -1);
-                    editor.putBoolean(KEY_IS_PRO_USER, true);
-                    Log.d(TAG, "Saved pro user status - unlimited VPN time");
-                } else {
-                    editor.putInt(KEY_ALLOWED_DURATION, durationSeconds);
-                    editor.putLong(KEY_CONNECTION_START_TIME, System.currentTimeMillis());
-                    editor.putBoolean(KEY_IS_PRO_USER, false);
-                    Log.d(TAG, "Saved timer settings - Duration: " + durationSeconds + " seconds, Start time: " + System.currentTimeMillis());
-                }
-                editor.apply();
-
-                // Start monitoring if VPN is already connected
-                String currentStatus = OpenVPNService.getStatus();
-                Log.d(TAG, "Current VPN status: " + currentStatus);
-
-                if (currentStatus != null && currentStatus.equals("connected")) {
-                    startTimerMonitoring();
-                } else {
-                    Log.d(TAG, "VPN not connected yet, timer will start when connected");
-                }
+@Override
+public int onStartCommand(Intent intent, int flags, int startId) {
+    // Handle force disconnect
+    if ("FORCE_DISCONNECT".equals(intent.getAction())) {
+        disconnectDueToTimeLimit();
+        return START_NOT_STICKY;
+    }
+    
+    // ✅ HANDLE TIMER UPDATE (when user purchases more time)
+    if (intent != null && "UPDATE_TIMER".equals(intent.getAction())) {
+        Log.d(TAG, "🔄 Received UPDATE_TIMER intent");
+        
+        int newDurationSeconds = intent.getIntExtra("duration_seconds", -1);
+        boolean isProUser = intent.getBooleanExtra("is_pro_user", false);
+        
+        Log.d(TAG, "🔄 Updating timer: newDuration=" + newDurationSeconds + 
+              " seconds, isProUser=" + isProUser);
+        
+        // Update shared preferences
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        SharedPreferences.Editor editor = prefs.edit();
+        
+        if (isProUser) {
+            editor.putInt(KEY_ALLOWED_DURATION, -1);
+            editor.putBoolean(KEY_IS_PRO_USER, true);
+            Log.d(TAG, "✅ Updated to Pro user - stopping timer monitoring");
+            
+            // Stop timer monitoring for pro users
+            stopTimerMonitoring();
+            cancelTimerAlarm();
+        } else {
+            // CRITICAL: Reset start time to NOW when adding time
+            long currentTime = System.currentTimeMillis();
+            editor.putInt(KEY_ALLOWED_DURATION, newDurationSeconds);
+            editor.putLong(KEY_CONNECTION_START_TIME, currentTime);
+            editor.putBoolean(KEY_IS_PRO_USER, false);
+            
+            Log.d(TAG, "✅ Updated timer: " + newDurationSeconds + 
+                  " seconds starting from " + currentTime);
+            
+            // Restart timer monitoring with new duration
+            String currentStatus = OpenVPNService.getStatus();
+            if (currentStatus != null && currentStatus.equals("connected")) {
+                // Stop existing timer
+                stopTimerMonitoring();
+                cancelTimerAlarm();
+                
+                // Start new timer with updated duration
+                startTimerMonitoring();
+                
+                Log.d(TAG, "✅ Timer monitoring restarted with new duration");
             }
-
-            return START_STICKY;
         }
+        
+        editor.apply();
+        return START_STICKY;
+    }
+    
+    // ✅ HANDLE TIMER MONITORING INTENT
+    if (intent != null && "START_TIMER_MONITORING".equals(intent.getAction())) {
+        Log.d(TAG, "Received START_TIMER_MONITORING intent");
+
+        // Get duration and pro status from intent
+        int durationSeconds = intent.getIntExtra("duration_seconds", -1);
+        boolean isProUser = intent.getBooleanExtra("is_pro_user", false);
+
+        Log.d(TAG, "Timer params - Duration: " + durationSeconds + ", Pro: " + isProUser);
+
+        if (durationSeconds > 0 || isProUser) {
+            // Save to preferences
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            if (prefs.getInt(KEY_ALLOWED_DURATION, -1) > 0) {
+                startTimerMonitoring();
+            }
+            SharedPreferences.Editor editor = prefs.edit();
+
+            if (isProUser) {
+                editor.putInt(KEY_ALLOWED_DURATION, -1);
+                editor.putBoolean(KEY_IS_PRO_USER, true);
+                Log.d(TAG, "Saved pro user status - unlimited VPN time");
+            } else {
+                editor.putInt(KEY_ALLOWED_DURATION, durationSeconds);
+                editor.putLong(KEY_CONNECTION_START_TIME, System.currentTimeMillis());
+                editor.putBoolean(KEY_IS_PRO_USER, false);
+                Log.d(TAG, "Saved timer settings - Duration: " + durationSeconds + 
+                      " seconds, Start time: " + System.currentTimeMillis());
+            }
+            editor.apply();
+
+            // Start monitoring if VPN is already connected
+            String currentStatus = OpenVPNService.getStatus();
+            Log.d(TAG, "Current VPN status: " + currentStatus);
+
+            if (currentStatus != null && currentStatus.equals("connected")) {
+                startTimerMonitoring();
+            } else {
+                Log.d(TAG, "VPN not connected yet, timer will start when connected");
+            }
+        }
+
+        return START_STICKY;
+    }
 
         // ✅ EXISTING CODE - Handle always show notification
         if (intent != null && intent.getBooleanExtra(ALWAYS_SHOW_NOTIFICATION, false))
@@ -1235,25 +1288,47 @@ if ("FORCE_DISCONNECT".equals(intent.getAction())) {
                 long now = System.currentTimeMillis();
                 prefs.edit().putLong(KEY_CONNECTION_START_TIME, now).apply();
                 Log.d(TAG, "Set connection start time: " + now);
+                startTime = now;
             }
 
-            if (!isTimerMonitoringActive) {
-                isTimerMonitoringActive = true;
+            // Check if timer has already expired
+            long currentTime = System.currentTimeMillis();
+            long elapsedSeconds = (currentTime - startTime) / 1000;
 
-                // Acquire wake lock
-                if (wakeLock != null && !wakeLock.isHeld()) {
-                    wakeLock.acquire();
-                }
+            if (elapsedSeconds >= allowedDuration) {
+                Log.d(TAG, "⚠️ Timer already expired on start, disconnecting immediately");
+                disconnectDueToTimeLimit();
+                return;
+            }
 
+            // Stop any existing timer before starting new one
+            if (isTimerMonitoringActive) {
+                Log.d(TAG, "Stopping existing timer before starting new one");
+                stopTimerMonitoring();
+            }
+
+            isTimerMonitoringActive = true;
+
+            // Acquire wake lock
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire();
+                Log.d(TAG, "Wake lock acquired");
+            }
+
+            // Start timer checks
+            if (timerHandler != null && timerCheckRunnable != null) {
                 timerHandler.post(timerCheckRunnable);
-                Log.d(TAG, "Started timer monitoring with wake lock");
-
-                // Set alarm as backup (in case handler fails)
-                scheduleTimerAlarm(allowedDuration);
+                Log.d(TAG, "✅ Timer monitoring started");
             }
+
+            // Set alarm as backup
+            scheduleTimerAlarm(allowedDuration);
+
+            long remainingSeconds = allowedDuration - elapsedSeconds;
+            Log.d(TAG, "✅ Timer monitoring active: " + remainingSeconds + " seconds remaining");
 
         } catch (Exception e) {
-            Log.e(TAG, "Error starting timer monitoring: " + e.getMessage(), e);
+            Log.e(TAG, "❌ Error starting timer monitoring: " + e.getMessage(), e);
         }
     }
 
@@ -1263,14 +1338,18 @@ if ("FORCE_DISCONNECT".equals(intent.getAction())) {
 
             if (isTimerMonitoringActive) {
                 isTimerMonitoringActive = false;
-                timerHandler.removeCallbacks(timerCheckRunnable);
+
+                if (timerHandler != null && timerCheckRunnable != null) {
+                    timerHandler.removeCallbacks(timerCheckRunnable);
+                    Log.d(TAG, "Removed timer callbacks");
+                }
 
                 // Release wake lock
                 if (wakeLock != null && wakeLock.isHeld()) {
                     try {
                         wakeLock.release();
                         Log.d(TAG, "Wake lock released");
-                    } catch (Exception e) {
+                    } catch (RuntimeException e) {
                         Log.e(TAG, "Error releasing wake lock: " + e.getMessage());
                     }
                 }
@@ -1278,10 +1357,12 @@ if ("FORCE_DISCONNECT".equals(intent.getAction())) {
                 // Cancel alarm
                 cancelTimerAlarm();
 
-                Log.d(TAG, "Timer monitoring stopped");
+                Log.d(TAG, "✅ Timer monitoring stopped successfully");
+            } else {
+                Log.d(TAG, "Timer monitoring was not active");
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error stopping timer monitoring: " + e.getMessage(), e);
+            Log.e(TAG, "❌ Error stopping timer monitoring: " + e.getMessage(), e);
         }
     }
 
