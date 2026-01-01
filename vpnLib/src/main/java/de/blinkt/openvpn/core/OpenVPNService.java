@@ -596,28 +596,44 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         // ✅ HANDLE TIMER UPDATE (when user purchases more time)
         if (intent != null && "UPDATE_TIMER".equals(intent.getAction())) {
             Log.d(TAG, "🔄 ========== RECEIVED UPDATE_TIMER INTENT ==========");
+            Log.d(TAG, "🔄 Thread: " + Thread.currentThread().getName());
+            Log.d(TAG, "🔄 Timestamp: " + System.currentTimeMillis());
 
             int newDurationSeconds = intent.getIntExtra("duration_seconds", -1);
             boolean isProUser = intent.getBooleanExtra("is_pro_user", false);
 
-            Log.d(TAG, "🔄 New total duration: " + newDurationSeconds + " seconds, isProUser: " + isProUser);
+            Log.d(TAG, "📥 Intent extras:");
+            Log.d(TAG, "   - duration_seconds: " + newDurationSeconds);
+            Log.d(TAG, "   - is_pro_user: " + isProUser);
+            Log.d(TAG, "   - VPN connected status: " + isVpnConnected);
 
             // ✅ Check if VPN is actually connected before updating timer
             if (!isVpnConnected) {
-                Log.d(TAG, "⚠️ VPN not connected, skipping timer update");
+                Log.e(TAG, "❌ VPN not connected, aborting timer update");
+                Log.d(TAG, "========== UPDATE_TIMER ABORTED ==========");
                 return START_STICKY;
             }
 
+            Log.d(TAG, "✅ VPN is connected, proceeding with timer update");
+
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+
+            // Log BEFORE values
+            Log.d(TAG, "📊 BEFORE update - SharedPreferences:");
+            Log.d(TAG, "   - allowed_duration_seconds: " + prefs.getInt(KEY_ALLOWED_DURATION, -999));
+            Log.d(TAG, "   - connection_start_time: " + prefs.getLong(KEY_CONNECTION_START_TIME, -999));
+            Log.d(TAG, "   - is_pro_user: " + prefs.getBoolean(KEY_IS_PRO_USER, false));
+            Log.d(TAG, "   - timer_monitoring_active: " + isTimerMonitoringActive);
+
             SharedPreferences.Editor editor = prefs.edit();
 
             if (isProUser) {
+                Log.d(TAG, "🌟 PRO user update - setting unlimited time");
                 editor.putInt(KEY_ALLOWED_DURATION, -1);
                 editor.putBoolean(KEY_IS_PRO_USER, true);
-                editor.apply();
+                editor.commit();
 
-                Log.d(TAG, "✅ Updated to Pro user - stopping timer monitoring");
-
+                Log.d(TAG, "🛑 Stopping timer monitoring for PRO user");
                 stopTimerMonitoring();
                 cancelTimerAlarm();
 
@@ -625,32 +641,46 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             } else {
                 // ✅ CRITICAL: Reset start time to NOW when adding time
                 long currentTime = System.currentTimeMillis();
+                long oldStartTime = prefs.getLong(KEY_CONNECTION_START_TIME, 0);
+                long elapsedSeconds = oldStartTime > 0 ? (currentTime - oldStartTime) / 1000 : 0;
 
-                Log.d(TAG, String.format("📊 Before update: StartTime=%d",
-                        prefs.getLong(KEY_CONNECTION_START_TIME, 0)));
+                Log.d(TAG, "⏱️ Regular user update:");
+                Log.d(TAG, "   - Old start time: " + oldStartTime);
+                Log.d(TAG, "   - Current time: " + currentTime);
+                Log.d(TAG, "   - Elapsed seconds: " + elapsedSeconds);
+                Log.d(TAG, "   - NEW total duration: " + newDurationSeconds);
+                Log.d(TAG, "   - RESETTING start time to NOW");
 
                 editor.putInt(KEY_ALLOWED_DURATION, newDurationSeconds);
                 editor.putLong(KEY_CONNECTION_START_TIME, currentTime); // ✅ RESET to NOW
                 editor.putBoolean(KEY_IS_PRO_USER, false);
-                editor.apply();
+                boolean commitSuccess = editor.commit();
 
-                Log.d(TAG, String.format("📊 After update: Duration=%ds, StartTime=%d (NOW)",
-                        newDurationSeconds, currentTime));
+                Log.d(TAG, "💾 Preferences commit result: " + commitSuccess);
+
+                // Log AFTER values
+                Log.d(TAG, "📊 AFTER update - SharedPreferences:");
+                Log.d(TAG, "   - allowed_duration_seconds: " + prefs.getInt(KEY_ALLOWED_DURATION, -999));
+                Log.d(TAG, "   - connection_start_time: " + prefs.getLong(KEY_CONNECTION_START_TIME, -999));
+                Log.d(TAG, "   - is_pro_user: " + prefs.getBoolean(KEY_IS_PRO_USER, false));
 
                 // ✅ CRITICAL: Restart timer monitoring with new duration
                 if (isVpnConnected) {
                     Log.d(TAG, "🔄 Restarting timer monitoring...");
 
                     // Stop existing timer and alarm
+                    Log.d(TAG, "🛑 Stopping existing timer and alarm");
                     stopTimerMonitoring();
                     cancelTimerAlarm();
 
                     // Wait a moment for cleanup
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                        // Start fresh timer with new duration
+                        Log.d(TAG, "🚀 Starting fresh timer with NEW duration");
                         startTimerMonitoring();
-                        Log.d(TAG, "✅ Timer monitoring restarted with NEW duration");
-                    }, 200);
+                        Log.d(TAG, "✅ Timer monitoring restarted successfully");
+                    }, 300);
+                } else {
+                    Log.e(TAG, "❌ VPN disconnected during update process");
                 }
 
                 Log.d(TAG, "========== UPDATE_TIMER COMPLETED ==========");
@@ -994,30 +1024,40 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
     private void checkVpnTimeLimit() {
         try {
+            Log.d(TAG, "⏰ ========== checkVpnTimeLimit START ==========");
+            Log.d(TAG, "⏰ Timestamp: " + System.currentTimeMillis());
+
             // ✅ First check if VPN is still connected
             if (!isVpnConnected) {
-                Log.d(TAG, "VPN not connected, stopping timer monitoring");
+                Log.d(TAG, "❌ VPN not connected, stopping timer monitoring");
                 stopTimerMonitoring();
                 return;
             }
+            Log.d(TAG, "✅ VPN is connected");
 
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 
             boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
-            if (isProUser) {
-                Log.d(TAG, "Pro user - no time limit");
-                return;
-            }
-
             int allowedDuration = prefs.getInt(KEY_ALLOWED_DURATION, -1);
-            if (allowedDuration <= 0) {
-                Log.d(TAG, "No time limit set or invalid duration");
+            long startTime = prefs.getLong(KEY_CONNECTION_START_TIME, 0);
+
+            Log.d(TAG, "📊 Timer values:");
+            Log.d(TAG, "   - isProUser: " + isProUser);
+            Log.d(TAG, "   - allowedDuration: " + allowedDuration + " seconds");
+            Log.d(TAG, "   - startTime: " + startTime);
+
+            if (isProUser) {
+                Log.d(TAG, "🌟 Pro user - no time limit");
                 return;
             }
 
-            long startTime = prefs.getLong(KEY_CONNECTION_START_TIME, 0);
+            if (allowedDuration <= 0) {
+                Log.d(TAG, "⚠️ No time limit set or invalid duration");
+                return;
+            }
+
             if (startTime == 0) {
-                Log.d(TAG, "No start time recorded");
+                Log.d(TAG, "⚠️ No start time recorded");
                 return;
             }
 
@@ -1025,22 +1065,34 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             long elapsedSeconds = (currentTime - startTime) / 1000;
             long remainingSeconds = allowedDuration - elapsedSeconds;
 
-            Log.d(TAG, String.format("VPN Timer Check - Elapsed: %ds, Allowed: %ds, Remaining: %ds",
-                    elapsedSeconds, allowedDuration, remainingSeconds));
+            Log.d(TAG, "⏱️ TIME CALCULATION:");
+            Log.d(TAG, "   - Current time: " + currentTime);
+            Log.d(TAG, "   - Start time: " + startTime);
+            Log.d(TAG, "   - Time difference (ms): " + (currentTime - startTime));
+            Log.d(TAG, "   - Elapsed seconds: " + elapsedSeconds);
+            Log.d(TAG, "   - Allowed duration: " + allowedDuration);
+            Log.d(TAG, "   - REMAINING seconds: " + remainingSeconds);
 
             // Show warning at 1 minute
             if (remainingSeconds <= 60 && remainingSeconds > 50) {
+                Log.d(TAG, "⚠️ Time warning: " + remainingSeconds + " seconds remaining");
                 showTimeWarningNotification(remainingSeconds);
             }
 
             // Time's up - disconnect
             if (remainingSeconds <= 0) {
-                Log.d(TAG, "VPN time limit reached - disconnecting NOW");
+                Log.d(TAG, "⏰ ========== TIME LIMIT REACHED ==========");
+                Log.d(TAG, "🛑 VPN time expired - disconnecting NOW");
+                Log.d(TAG, "   - Elapsed: " + elapsedSeconds + "s");
+                Log.d(TAG, "   - Allowed: " + allowedDuration + "s");
+                Log.d(TAG, "   - Overtime by: " + Math.abs(remainingSeconds) + "s");
                 disconnectDueToTimeLimit();
             }
 
+            Log.d(TAG, "========== checkVpnTimeLimit END ==========");
+
         } catch (Exception e) {
-            Log.e(TAG, "Error checking VPN time limit: " + e.getMessage(), e);
+            Log.e(TAG, "❌ Error in checkVpnTimeLimit: " + e.getMessage(), e);
         }
     }
 
