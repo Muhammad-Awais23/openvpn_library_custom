@@ -344,6 +344,9 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     public void openvpnStopped() {
         Log.d(TAG, "🛑 ========== openvpnStopped CALLED ==========");
 
+        // ✅ Reset state IMMEDIATELY
+        state = "idle";
+
         // Stop timer first
         stopTimerMonitoring();
 
@@ -385,7 +388,8 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         // Stop timer
         stopTimerMonitoring();
 
-        // Reset all flags
+        // ✅ CRITICAL: Reset state FIRST
+        state = "idle"; // Reset the static state variable
         isVpnConnected = false;
         mStarting = false;
         mDisplayBytecount = false;
@@ -417,7 +421,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         ProfileManager.setConntectedVpnProfileDisconnected(this);
 
         if (!mStarting) {
-            stopForeground(true); // ✅ Always remove notification
+            stopForeground(true);
 
             if (!mNotificationAlwaysVisible) {
                 stopSelf();
@@ -425,9 +429,12 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             }
         }
 
-        Log.d(TAG, "✅ endVpnService completed");
-    }
+        // ✅ FORCE update state to disconnected
+        VpnStatus.updateStateString("NOPROCESS", "", R.string.state_noprocess,
+                ConnectionStatus.LEVEL_NOTCONNECTED);
 
+        Log.d(TAG, "✅ endVpnService completed, state reset to: " + state);
+    }
     @RequiresApi(Build.VERSION_CODES.O)
     private String createNotificationChannel(String channelId, String channelName) {
         NotificationChannel chan = new NotificationChannel(channelId,
