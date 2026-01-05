@@ -312,17 +312,31 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     @Override
     public void onRevoke() {
         VpnStatus.logError(R.string.permission_revoked);
-        mManagement.stopVPN(false);
+        if (mManagement != null) {
+            mManagement.stopVPN(false);
+            mManagement = null; // ✅ ADD THIS
+        }
         endVpnService();
     }
 
     // Similar to revoke but do not try to stop process
+
     public void openvpnStopped() {
+        // ✅ ADD THIS
+        mManagement = null;
         endVpnService();
     }
 
+
+
     public void endVpnService() {
         stopTimerMonitoring();
+
+        // ✅ ADD THESE RESETS
+        isVpnConnected = false;
+        mStarting = false;
+        mDisplayBytecount = false;
+
         synchronized (mProcessLock) {
             mProcessThread = null;
         }
@@ -330,6 +344,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         unregisterDeviceStateReceiver();
         ProfileManager.setConntectedVpnProfileDisconnected(this);
         mOpenVPNThread = null;
+
         if (!mStarting) {
             stopForeground(!mNotificationAlwaysVisible);
 
@@ -833,31 +848,50 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
         // ✅ ANSWER TO YOUR QUESTION: YES, KEEP THIS CODE!
         // This ensures timer monitoring resumes after service restart
-        if (timerHandler != null) {
+        // Only schedule timer check if we're actually connecting
+        if (mProfile != null && timerHandler != null) {
+            // Clear any existing delayed callbacks first
+            timerHandler.removeCallbacksAndMessages(null);
+
             timerHandler.postDelayed(() -> {
-                Log.d(TAG, "Checking if timer monitoring should start...");
                 String currentStatus = OpenVPNService.getStatus();
-                Log.d(TAG, "Current VPN status after delay: " + currentStatus);
+                if ("connected".equals(currentStatus)) {
+                    SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    int allowedDuration = prefs.getInt(KEY_ALLOWED_DURATION, -1);
+                    boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
 
-                // Start timer monitoring if we have saved preferences
-                SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                int allowedDuration = prefs.getInt(KEY_ALLOWED_DURATION, -1);
-                boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
-
-                Log.d(TAG, "Saved preferences - Duration: " + allowedDuration + ", Pro: " + isProUser);
-
-                if (!isProUser && allowedDuration > 0) {
-                    Log.d(TAG, "Timer preferences found, will start monitoring when connected");
-                    // Timer will start when updateState receives LEVEL_CONNECTED
-                } else {
-                    Log.d(TAG, "No timer needed (Pro user or no duration set)");
+                    if (!isProUser && allowedDuration > 0 && !isTimerMonitoringActive) {
+                        Log.d(TAG, "Starting timer monitoring after connection");
+                        startTimerMonitoring();
+                    }
                 }
-            }, 3000); // Wait 3 seconds for connection to establish
+            }, 3000);
         }
 
         return START_STICKY;
     }
+    private void resetConnectionState() {
+        Log.d(TAG, "🔄 Resetting connection state");
 
+        isVpnConnected = false;
+        mStarting = false;
+        mDisplayBytecount = false;
+
+        // Stop and clear timer
+        stopTimerMonitoring();
+        if (timerHandler != null) {
+            timerHandler.removeCallbacksAndMessages(null);
+        }
+
+        // Clear management
+        mManagement = null;
+
+        // Reset time tracking
+        c = Calendar.getInstance().getTimeInMillis();
+        lastPacketReceive = 0;
+
+        Log.d(TAG, "✅ Connection state reset complete");
+    }
     @RequiresApi(Build.VERSION_CODES.N_MR1)
     private void updateShortCutUsage(VpnProfile profile) {
         if (profile == null)
@@ -867,6 +901,21 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     }
 
     private void startOpenVPN() {
+        // ✅ ADD CHECK - Don't start if already starting
+        if (mStarting) {
+            Log.w(TAG, "⚠️ Already starting VPN, ignoring duplicate start request");
+            return;
+        }
+
+        Log.d(TAG, "🚀 Starting OpenVPN...");
+
+        try {
+            mProfile.writeConfigFile(this);
+        } catch (IOException e) {
+            VpnStatus.logException("Error writing config file", e);
+            endVpnService();
+            return;
+        }
         try {
             mProfile.writeConfigFile(this);
         } catch (IOException e) {
@@ -1480,6 +1529,11 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
                     Log.d(TAG, "✅ Removed timer callbacks");
                 }
 
+                // ✅ ADD THIS - Remove ALL pending messages
+                if (timerHandler != null) {
+                    timerHandler.removeCallbacksAndMessages(null);
+                }
+
                 // Release wake lock
                 if (wakeLock != null && wakeLock.isHeld()) {
                     try {
@@ -1490,12 +1544,8 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
                     }
                 }
 
-                // Cancel alarm
                 cancelTimerAlarm();
-
                 Log.d(TAG, "✅ Timer monitoring STOPPED");
-            } else {
-                Log.d(TAG, "Timer monitoring was not active");
             }
         } catch (Exception e) {
             Log.e(TAG, "❌ Error stopping timer monitoring: " + e.getMessage(), e);
@@ -2013,7 +2063,8 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
                 Log.d(TAG, "❌ VPN Disconnected - Stopping timer monitoring");
 
                 stopTimerMonitoring();
-
+                // ✅ ADD THIS - Full reset on disconnect
+                resetConnectionState();
                 // ✅ Only clear preferences on NORMAL disconnect (not timer disconnect)
                 if (!isTimerMonitoringActive) {
                     clearTimerPreferences();
