@@ -322,26 +322,36 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
         VpnStatus.logError(R.string.permission_revoked);
 
+        // ✅ CRITICAL: Reset flags FIRST
+        mStarting = false;
+        isVpnConnected = false;
+        mDisplayBytecount = false;
+
         // Stop timer
         stopTimerMonitoring();
 
-        // ✅ Reset mStarting flag
-        mStarting = false;
-
         if (mManagement != null) {
-            mManagement.stopVPN(false);
+            try {
+                mManagement.stopVPN(false);
+            } catch (Exception e) {
+                Log.e(TAG, "Error in onRevoke: " + e.getMessage());
+            }
         }
 
         endVpnService();
     }
+
+
 
     // Similar to revoke but do not try to stop process
 
     public void openvpnStopped() {
         Log.d(TAG, "🛑 ========== openvpnStopped CALLED ==========");
 
-        // ✅ Reset mStarting flag
+        // ✅ CRITICAL: Reset flags FIRST
         mStarting = false;
+        isVpnConnected = false;
+        mDisplayBytecount = false;
 
         // Stop timer
         stopTimerMonitoring();
@@ -350,15 +360,16 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     }
 
 
+
     // ============= FIX 2: In endVpnService() method =============
     public void endVpnService() {
         Log.d(TAG, "🛑 ========== endVpnService CALLED ==========");
 
-        // Stop timer
+        // ✅ CRITICAL: ALWAYS stop timer and reset flags
         stopTimerMonitoring();
-
-        // ✅ CRITICAL: Reset mStarting flag
         mStarting = false;
+        isVpnConnected = false;
+        mDisplayBytecount = false;
 
         synchronized (mProcessLock) {
             mProcessThread = null;
@@ -369,18 +380,27 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         ProfileManager.setConntectedVpnProfileDisconnected(this);
         mOpenVPNThread = null;
 
-        if (!mStarting) {
-            stopForeground(!mNotificationAlwaysVisible);
+        // ✅ ALWAYS stop foreground when ending service
+        try {
+            stopForeground(true); // Always remove notification
+            Log.d(TAG, "✅ Stopped foreground service");
+        } catch (Exception e) {
+            Log.e(TAG, "Error stopping foreground: " + e.getMessage());
+        }
 
-            if (!mNotificationAlwaysVisible) {
+        // Only stop self if notification should not persist
+        if (!mNotificationAlwaysVisible) {
+            try {
                 stopSelf();
                 VpnStatus.removeStateListener(this);
+                Log.d(TAG, "✅ Called stopSelf()");
+            } catch (Exception e) {
+                Log.e(TAG, "Error in stopSelf: " + e.getMessage());
             }
         }
 
-        Log.d(TAG, "✅ endVpnService completed");
+        Log.d(TAG, "✅ endVpnService completed - Service ready for reconnection");
     }
-
 
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -627,9 +647,74 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         else
             return false;
     }
+    private void forceCleanState() {
+        Log.d(TAG, "🧹 ========== FORCE CLEAN STATE ==========");
+
+        // Reset all flags
+        mStarting = false;
+        isVpnConnected = false;
+        mDisplayBytecount = false;
+
+        // Stop timer
+        stopTimerMonitoring();
+        if (timerHandler != null) {
+            timerHandler.removeCallbacksAndMessages(null);
+        }
+
+        // Clear management
+        if (mManagement != null) {
+            try {
+                mManagement.stopVPN(false);
+            } catch (Exception e) {
+                Log.e(TAG, "Error stopping management: " + e.getMessage());
+            }
+            mManagement = null;
+        }
+
+        // Clear thread references
+        synchronized (mProcessLock) {
+            if (mProcessThread != null) {
+                mProcessThread.interrupt();
+                mProcessThread = null;
+            }
+        }
+        mOpenVPNThread = null;
+
+        // Update status
+        VpnStatus.updateStateString("NOPROCESS", "",
+                R.string.state_noprocess, ConnectionStatus.LEVEL_NOTCONNECTED);
+
+        Log.d(TAG, "✅ State cleaned - Ready for new connection");
+    }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // ✅ CRITICAL: Check if we're stuck in a bad state
+        if (mStarting && mManagement == null && mProcessThread == null) {
+            Log.d(TAG, "⚠️ DETECTED STUCK STATE - Force cleaning");
+            forceCleanState();
+        }
+
+        // ✅ Handle force disconnect
+        if (intent != null && "FORCE_DISCONNECT_AND_CLEANUP".equals(intent.getAction())) {
+            Log.d(TAG, "🛑 ========== FORCE_DISCONNECT_AND_CLEANUP ==========");
+            forceCleanState();
+            return START_NOT_STICKY;
+        }
+
+        // ... rest of your existing onStartCommand code ...
+
+        // ✅ IMPORTANT: Call startForeground IMMEDIATELY
+        VpnStatus.logInfo(R.string.building_configration);
+        VpnStatus.updateStateString("VPN_GENERATE_CONFIG", "",
+                R.string.building_configration, ConnectionStatus.LEVEL_START);
+
+        showNotification(VpnStatus.getLastCleanLogMessage(this),
+                VpnStatus.getLastCleanLogMessage(this),
+                NOTIFICATION_CHANNEL_NEWSTATUS_ID,
+                0,
+                ConnectionStatus.LEVEL_START,
+                null);
         // ✅ CRITICAL: Handle force disconnect and cleanup FIRST
         if (intent != null && "FORCE_DISCONNECT_AND_CLEANUP".equals(intent.getAction())) {
             Log.d(TAG, "🛑 ========== FORCE_DISCONNECT_AND_CLEANUP ==========");
@@ -2178,6 +2263,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     }
 
 
+
     @Override
     public void updateState(String state, String logmessage, int resid,
                             ConnectionStatus level, Intent intent) {
@@ -2185,9 +2271,8 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
         doSendBroadcast(state, level);
 
-        if (mProcessThread == null && !mNotificationAlwaysVisible)
-            return;
-
+        // ✅ FIX: Remove the early return that blocks notification updates
+        // This was preventing proper state updates during reconnection
         String channel = NOTIFICATION_CHANNEL_NEWSTATUS_ID;
 
         if (level == LEVEL_CONNECTED) {
@@ -2196,29 +2281,21 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             isVpnConnected = true;
             mDisplayBytecount = true;
             mConnecttime = System.currentTimeMillis();
-            mStarting = false;
+            mStarting = false; // ✅ Clear starting flag
 
             if (!runningOnAndroidTV())
                 channel = NOTIFICATION_CHANNEL_BG_ID;
 
-            // ✅ CRITICAL: Start timer monitoring when connected
+            // Start timer monitoring
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 if (isVpnConnected) {
-                    Log.d(TAG, "🔄 Checking if timer should start...");
-
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                     int allowedDuration = prefs.getInt(KEY_ALLOWED_DURATION, -1);
                     boolean isProUser = prefs.getBoolean(KEY_IS_PRO_USER, false);
-                    long startTime = prefs.getLong(KEY_CONNECTION_START_TIME, 0);
-
-                    Log.d(TAG, "Timer check - Duration: " + allowedDuration +
-                            ", Pro: " + isProUser + ", StartTime: " + startTime);
 
                     if (!isProUser && allowedDuration > 0) {
-                        Log.d(TAG, "✅ Starting timer monitoring for non-pro user");
+                        Log.d(TAG, "✅ Starting timer monitoring");
                         startTimerMonitoring();
-                    } else {
-                        Log.d(TAG, "⚠️ No timer needed (Pro user or unlimited)");
                     }
                 }
             }, 2000);
@@ -2229,22 +2306,29 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
             if (level == ConnectionStatus.LEVEL_NOTCONNECTED) {
                 Log.d(TAG, "❌ VPN DISCONNECTED");
 
+                // ✅ CRITICAL: Reset all state on disconnect
                 isVpnConnected = false;
                 mStarting = false;
 
                 // Stop timer
                 stopTimerMonitoring();
 
-                // Clear timer preferences if not actively monitoring
+                // Clear timer preferences
                 if (!isTimerMonitoringActive) {
                     clearTimerPreferences();
                 }
             }
         }
 
+        // ✅ ALWAYS update notification
         showNotification(VpnStatus.getLastCleanLogMessage(this),
-                VpnStatus.getLastCleanLogMessage(this), channel, 0, level, intent);
+                VpnStatus.getLastCleanLogMessage(this),
+                channel,
+                0,
+                level,
+                intent);
     }
+
 
 
     @Override

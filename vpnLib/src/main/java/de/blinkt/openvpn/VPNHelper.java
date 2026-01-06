@@ -6,8 +6,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.VpnService;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.RemoteException;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
@@ -79,7 +81,29 @@ public class VPNHelper extends Activity {
     }
 
     public void stopVPN() {
-        OpenVPNThread.stop();
+        Log.d("VPNHelper", "🛑 stopVPN called");
+
+        try {
+            // Stop the OpenVPN thread
+            OpenVPNThread.stop();
+
+            // ✅ CRITICAL: Send cleanup intent to service
+            Intent cleanupIntent = new Intent(activity, OpenVPNService.class);
+            cleanupIntent.setAction("FORCE_DISCONNECT_AND_CLEANUP");
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(cleanupIntent);
+            } else {
+                activity.startService(cleanupIntent);
+            }
+
+            // Reset state
+            vpnStart = false;
+
+            Log.d("VPNHelper", "✅ stopVPN completed");
+        } catch (Exception e) {
+            Log.e("VPNHelper", "Error in stopVPN: " + e.getMessage(), e);
+        }
     }
 
     private void connect() {
