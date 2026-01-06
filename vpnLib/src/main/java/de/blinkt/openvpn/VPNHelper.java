@@ -84,18 +84,8 @@ public class VPNHelper extends Activity {
         Log.d("VPNHelper", "🛑 stopVPN called");
 
         try {
-            // Stop the OpenVPN thread
+            // Just stop the OpenVPN thread - that's enough!
             OpenVPNThread.stop();
-
-            // ✅ CRITICAL: Send cleanup intent to service
-            Intent cleanupIntent = new Intent(activity, OpenVPNService.class);
-            cleanupIntent.setAction("FORCE_DISCONNECT_AND_CLEANUP");
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                activity.startForegroundService(cleanupIntent);
-            } else {
-                activity.startService(cleanupIntent);
-            }
 
             // Reset state
             vpnStart = false;
@@ -105,7 +95,6 @@ public class VPNHelper extends Activity {
             Log.e("VPNHelper", "Error in stopVPN: " + e.getMessage(), e);
         }
     }
-
     private void connect() {
         try {
             OpenVpnApi.startVpn(activity, config,name, username, password, bypassPackages);
