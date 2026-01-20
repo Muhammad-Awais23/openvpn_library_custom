@@ -296,7 +296,7 @@ public class InternetConnectivityMonitor {
         Notification.Builder builder = new Notification.Builder(context)
             .setContentTitle("No Internet Connection")
             .setContentText("VPN is connected but there's no internet access. Check your connection.")
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(R.drawable.high)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setOngoing(false)
@@ -350,7 +350,7 @@ public class InternetConnectivityMonitor {
         Notification.Builder builder = new Notification.Builder(context)
             .setContentTitle("Internet Restored")
             .setContentText("Your internet connection has been restored.")
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(R.drawable.high)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setOngoing(false);

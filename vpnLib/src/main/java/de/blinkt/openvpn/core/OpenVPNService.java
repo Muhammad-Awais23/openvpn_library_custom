@@ -457,7 +457,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         nbuilder.setContentText(msg);
         nbuilder.setOnlyAlertOnce(true);
         nbuilder.setOngoing(true);
-        nbuilder.setSmallIcon(R.drawable.ic_notification);
+        nbuilder.setSmallIcon(R.drawable.high);
         nbuilder.setContentIntent(pendingIntent);
 
         if (when != 0) nbuilder.setWhen(when);
@@ -1239,7 +1239,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
             nbuilder.setContentTitle("VPN Time Limit Warning");
             nbuilder.setContentText(String.format("VPN will disconnect in %d seconds. Purchase more time to continue.", remainingSeconds));
-            nbuilder.setSmallIcon(R.drawable.ic_notification);
+            nbuilder.setSmallIcon(R.drawable.high);
             nbuilder.setAutoCancel(true);
             nbuilder.setOngoing(false);
 
@@ -1382,7 +1382,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
                         .bigText("Your VPN session has ended. Purchase more time to continue using the VPN service."));
             }
 
-            nbuilder.setSmallIcon(R.drawable.ic_notification);
+            nbuilder.setSmallIcon(R.drawable.high);
             nbuilder.setContentIntent(pendingIntent);
             nbuilder.setAutoCancel(true);
             nbuilder.setOngoing(false);
