@@ -91,7 +91,7 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
     private Handler timerHandler;
     private Runnable timerCheckRunnable;
     private boolean isTimerMonitoringActive = false;
-
+    private InternetConnectivityMonitor internetMonitor;
     // Timer related fields
     public static final String START_SERVICE = "de.blinkt.openvpn.START_SERVICE";
     public static final String START_SERVICE_STICKY = "de.blinkt.openvpn.START_SERVICE_STICKY";
@@ -368,6 +368,12 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
         // ✅ ALWAYS reset flags first
         stopTimerMonitoring();
+        // ✅ ADD THIS - Stop internet monitoring
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && internetMonitor != null) {
+            internetMonitor.stopMonitoring();
+            Log.d(TAG, "🛑 Stopped internet monitoring in endVpnService");
+        }
+
         mStarting = false;
         isVpnConnected = false;
         mDisplayBytecount = false;
@@ -1102,7 +1108,11 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
         setupTimerCheck();
 
         alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-
+// ✅ ADD THIS - Initialize internet monitor
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            internetMonitor = new InternetConnectivityMonitor(this);
+            Log.d(TAG, "✅ Internet monitor initialized");
+        }
         // Check and resume timer monitoring
         checkAndResumeTimerMonitoring();
     }
@@ -1632,6 +1642,12 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
         // Stop timer
         stopTimerMonitoring();
+        // ✅ ADD THIS - Stop internet monitoring
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && internetMonitor != null) {
+            internetMonitor.stopMonitoring();
+            internetMonitor = null;
+            Log.d(TAG, "🛑 Internet monitor destroyed");
+        }
 
         // Quit timer thread
         if (timerThread != null) {
@@ -2146,7 +2162,15 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
             if (!runningOnAndroidTV())
                 channel = NOTIFICATION_CHANNEL_BG_ID;
-
+            // ✅ ADD THIS - Start internet monitoring when VPN connects
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && internetMonitor != null) {
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (isVpnConnected && internetMonitor != null) {
+                        internetMonitor.startMonitoring();
+                        Log.d(TAG, "🌐 Started internet monitoring");
+                    }
+                }, 3000); // Wait 3 seconds for VPN to stabilize
+            }
             // Start timer monitoring
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 if (isVpnConnected) {
@@ -2169,6 +2193,11 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
                 isVpnConnected = false;
                 mStarting = false;
+                // ✅ ADD THIS - Stop internet monitoring when VPN disconnects
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && internetMonitor != null) {
+                    internetMonitor.stopMonitoring();
+                    Log.d(TAG, "🛑 Stopped internet monitoring");
+                }
 
                 stopTimerMonitoring();
 
