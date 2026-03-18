@@ -196,6 +196,10 @@ public class VpnStatus {
 
     private static ConnectionStatus mLastLevel = ConnectionStatus.LEVEL_NOTCONNECTED;
 
+    public static ConnectionStatus getLastLevel() {
+        return mLastLevel;
+    }
+
     private static LogFileHandler mLogFileHandler;
 
     static {

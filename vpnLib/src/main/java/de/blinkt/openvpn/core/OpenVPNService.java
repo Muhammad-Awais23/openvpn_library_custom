@@ -696,18 +696,44 @@ public class OpenVPNService extends VpnService implements StateListener, Callbac
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // ✅ CRITICAL: Call startForeground() IMMEDIATELY at the VERY TOP
-        // This must be FIRST to avoid foreground service timeout
-        VpnStatus.logInfo(R.string.building_configration);
-        VpnStatus.updateStateString("VPN_GENERATE_CONFIG", "",
-                R.string.building_configration, ConnectionStatus.LEVEL_START);
+        String action = (intent != null) ? intent.getAction() : null;
 
-        showNotification(VpnStatus.getLastCleanLogMessage(this),
-                VpnStatus.getLastCleanLogMessage(this),
-                NOTIFICATION_CHANNEL_NEWSTATUS_ID,
-                0,
-                ConnectionStatus.LEVEL_START,
-                null);
+        // ✅ HANDLE BACKGROUND ACTIONS WITHOUT CHANGING VPN STATE
+        // We only want to log "Building Configuration" if we are actually starting a VPN
+        boolean isStartingVPN = (action == null || START_SERVICE.equals(action) || START_SERVICE_STICKY.equals(action)
+                || (intent != null && intent.hasExtra(getPackageName() + ".profileUUID")));
+
+        // Exclude utility actions specifically
+        boolean isUtilityAction = "UPDATE_TIMER".equals(action) ||
+                "START_TIMER_MONITORING".equals(action) ||
+                "FORCE_DISCONNECT".equals(action) ||
+                DISCONNECT_VPN.equals(action) ||
+                PAUSE_VPN.equals(action) ||
+                RESUME_VPN.equals(action);
+
+        if (isStartingVPN && !isUtilityAction) {
+            // ✅ ORIGINAL START LOGIC: Only for real connection starts
+            VpnStatus.logInfo(R.string.building_configration);
+            VpnStatus.updateStateString("VPN_GENERATE_CONFIG", "",
+                    R.string.building_configration, ConnectionStatus.LEVEL_START);
+
+            showNotification(VpnStatus.getLastCleanLogMessage(this),
+                    VpnStatus.getLastCleanLogMessage(this),
+                    NOTIFICATION_CHANNEL_NEWSTATUS_ID,
+                    0,
+                    ConnectionStatus.LEVEL_START,
+                    null);
+        } else {
+            // It's a utility action (like updating the timer)
+            // Still call startForeground() IMMEDIATELY to satisfy Android O requirement
+            // But use the LAST state level instead of hardcoded LEVEL_START
+            showNotification(VpnStatus.getLastCleanLogMessage(this),
+                    VpnStatus.getLastCleanLogMessage(this),
+                    NOTIFICATION_CHANNEL_NEWSTATUS_ID,
+                    0,
+                    VpnStatus.getLastLevel(),
+                    null);
+        }
 
         // Handle force disconnect (from timer alarm)
         if (intent != null && "FORCE_DISCONNECT".equals(intent.getAction())) {
